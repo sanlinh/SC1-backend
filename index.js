@@ -227,32 +227,32 @@ const forgotPasswordLimiter = rateLimit({
   message: { message: 'Too many requests. Please try again later.' }
 });
 
-let smtpTransporterPromise = null;
-let smtpConnectHostPromise = null;
+let smtpConnectHostsPromise = null;
 
-async function resolveSmtpConnectHost() {
-  if (smtpConnectHostPromise) {
-    return smtpConnectHostPromise;
+async function resolveSmtpConnectHosts() {
+  if (smtpConnectHostsPromise) {
+    return smtpConnectHostsPromise;
   }
 
   const smtpHost = process.env.SMTP_HOST;
-  smtpConnectHostPromise = (async () => {
+  smtpConnectHostsPromise = (async () => {
     if (!smtpHost) {
-      return smtpHost;
+      return [];
     }
 
     try {
       const ipv4Addresses = await dns.promises.resolve4(smtpHost);
       if (Array.isArray(ipv4Addresses) && ipv4Addresses.length > 0) {
-        return ipv4Addresses[0];
+        return ipv4Addresses;
       }
     } catch (_err) {
       // Fall back to the configured hostname if IPv4 resolution is unavailable.
     }
-    return smtpHost;
+
+    return [smtpHost];
   })();
 
-  return smtpConnectHostPromise;
+  return smtpConnectHostsPromise;
 }
 
 function createSmtpTransport(connectHost) {
@@ -274,14 +274,22 @@ function createSmtpTransport(connectHost) {
   });
 }
 
-async function getSmtpTransporter() {
-  if (!smtpTransporterPromise) {
-    smtpTransporterPromise = (async () => {
-      const connectHost = await resolveSmtpConnectHost();
-      return createSmtpTransport(connectHost);
-    })();
+async function withSmtpTransport(workFn) {
+  const hosts = await resolveSmtpConnectHosts();
+  const candidates = hosts.length > 0 ? hosts : [process.env.SMTP_HOST].filter(Boolean);
+  let lastErr = null;
+
+  for (const connectHost of candidates) {
+    const transporter = createSmtpTransport(connectHost);
+    try {
+      return await workFn(transporter, connectHost);
+    } catch (err) {
+      lastErr = err;
+      console.error(`SMTP connection attempt failed for ${connectHost}:${Number(process.env.SMTP_PORT || 587)}:`, err.message);
+    }
   }
-  return smtpTransporterPromise;
+
+  throw lastErr || new Error('No SMTP host available');
 }
 
 const frontendBaseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
@@ -289,16 +297,21 @@ const frontendBaseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'h
 if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
   console.warn('SMTP env is incomplete. Forgot-password emails will fail until SMTP vars are set.');
 } else {
-  getSmtpTransporter()
-    .then((transporter) =>
-      transporter.verify((err) => {
-        if (err) {
-          console.error('SMTP verify failed:', err.message);
-          return;
-        }
-        console.log(`SMTP transporter is ready (family=${Number(process.env.SMTP_FAMILY || 4)})`);
+  withSmtpTransport(
+    (transporter, connectHost) =>
+      new Promise((resolve, reject) => {
+        transporter.verify((err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve(connectHost);
+        });
       })
-    )
+  )
+    .then((connectHost) => {
+      console.log(`SMTP transporter is ready (host=${connectHost}, family=${Number(process.env.SMTP_FAMILY || 4)})`);
+    })
     .catch((err) => {
       console.error('SMTP verify failed:', err.message);
     });
@@ -312,18 +325,19 @@ function createPasswordResetCode() {
 }
 
 async function sendPasswordResetEmail(toEmail, rawCode) {
-  const transporter = await getSmtpTransporter();
-  await transporter.sendMail({
-    from: process.env.SMTP_FROM || process.env.SMTP_USER,
-    to: toEmail,
-    subject: 'EduQuest Password Reset Code',
-    text: `Your EduQuest password reset code is: ${rawCode}\nThis code expires in 15 minutes.`,
-    html: `
-      <p>Your EduQuest password reset code is:</p>
-      <p style="font-size: 24px; font-weight: 700; letter-spacing: 4px;">${rawCode}</p>
-      <p>This code expires in 15 minutes.</p>
-    `
-  });
+  await withSmtpTransport((transporter) =>
+    transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: toEmail,
+      subject: 'EduQuest Password Reset Code',
+      text: `Your EduQuest password reset code is: ${rawCode}\nThis code expires in 15 minutes.`,
+      html: `
+        <p>Your EduQuest password reset code is:</p>
+        <p style="font-size: 24px; font-weight: 700; letter-spacing: 4px;">${rawCode}</p>
+        <p>This code expires in 15 minutes.</p>
+      `
+    })
+  );
 }
 
 
