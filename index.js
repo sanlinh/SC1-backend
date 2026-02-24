@@ -241,25 +241,23 @@ if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) 
   });
 }
 
-function createPasswordResetToken() {
-  const rawToken = crypto.randomBytes(32).toString('hex');
-  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+function createPasswordResetCode() {
+  const rawCode = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  const tokenHash = crypto.createHash('sha256').update(rawCode).digest('hex');
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
-  return { rawToken, tokenHash, expiresAt };
+  return { rawCode, tokenHash, expiresAt };
 }
 
-async function sendPasswordResetEmail(toEmail, rawToken) {
-  const resetUrl = `${frontendBaseUrl.replace(/\/$/, '')}/reset-password?token=${rawToken}`;
-
+async function sendPasswordResetEmail(toEmail, rawCode) {
   await transporter.sendMail({
     from: process.env.SMTP_FROM || process.env.SMTP_USER,
     to: toEmail,
-    subject: 'EduQuest Password Reset',
-    text: `Reset your password: ${resetUrl}\nThis link expires in 15 minutes.`,
+    subject: 'EduQuest Password Reset Code',
+    text: `Your EduQuest password reset code is: ${rawCode}\nThis code expires in 15 minutes.`,
     html: `
-      <p>Reset your EduQuest password:</p>
-      <p><a href="${resetUrl}">${resetUrl}</a></p>
-      <p>This link expires in 15 minutes.</p>
+      <p>Your EduQuest password reset code is:</p>
+      <p style="font-size: 24px; font-weight: 700; letter-spacing: 4px;">${rawCode}</p>
+      <p>This code expires in 15 minutes.</p>
     `
   });
 }
@@ -322,7 +320,7 @@ async function sendPasswordResetEmail(toEmail, rawToken) {
       const { identifier } = req.body; // email or username
       if (!identifier || !String(identifier).trim()) {
         return res.status(200).json({
-          message: 'If an account exists, a reset link has been sent.'
+          message: 'If an account exists, a reset code has been sent.'
         });
       }
 
@@ -334,24 +332,28 @@ async function sendPasswordResetEmail(toEmail, rawToken) {
       // Always return generic message to prevent account enumeration
       if (!user) {
         return res.status(200).json({
-          message: 'If an account exists, a reset link has been sent.'
+          message: 'If an account exists, a reset code has been sent.'
         });
       }
 
-      const { rawToken, tokenHash, expiresAt } = createPasswordResetToken();
+      const { rawCode, tokenHash, expiresAt } = createPasswordResetCode();
       user.resetPasswordTokenHash = tokenHash;
       user.resetPasswordExpires = expiresAt;
       await user.save();
 
-      await sendPasswordResetEmail(user.email, rawToken);
+      setImmediate(() => {
+        sendPasswordResetEmail(user.email, rawCode).catch((mailErr) => {
+          console.error(`Forgot password mail send failed for ${user.email}:`, mailErr.message);
+        });
+      });
 
       return res.status(200).json({
-        message: 'If an account exists, a reset link has been sent.'
+        message: 'If an account exists, a reset code has been sent.'
       });
     } catch (err) {
       console.error('Forgot password error:', err.message);
       return res.status(200).json({
-        message: 'If an account exists, a reset link has been sent.'
+        message: 'If an account exists, a reset code has been sent.'
       });
     }
   };
@@ -364,13 +366,14 @@ async function sendPasswordResetEmail(toEmail, rawToken) {
 
   app.post('/api/auth/reset-password', async (req, res) => {
     try {
-      const { token, newPassword } = req.body;
+      const { otp, token, newPassword } = req.body;
+      const codeOrToken = String(otp || token || '').trim();
 
-      if (!token || !newPassword || String(newPassword).length < 8) {
-        return res.status(400).json({ message: 'Invalid token or password too short' });
+      if (!codeOrToken || !newPassword || String(newPassword).length < 8) {
+        return res.status(400).json({ message: 'Invalid reset code or password too short' });
       }
 
-      const tokenHash = crypto.createHash('sha256').update(String(token)).digest('hex');
+      const tokenHash = crypto.createHash('sha256').update(codeOrToken).digest('hex');
 
       const user = await User.findOne({
         resetPasswordTokenHash: tokenHash,
@@ -378,7 +381,7 @@ async function sendPasswordResetEmail(toEmail, rawToken) {
       });
 
       if (!user) {
-        return res.status(400).json({ message: 'Token is invalid or expired' });
+        return res.status(400).json({ message: 'Reset code is invalid or expired' });
       }
 
       await user.setPassword(String(newPassword));
