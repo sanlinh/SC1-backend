@@ -227,32 +227,81 @@ const forgotPasswordLimiter = rateLimit({
   message: { message: 'Too many requests. Please try again later.' }
 });
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: String(process.env.SMTP_SECURE) === 'true',
-  family: Number(process.env.SMTP_FAMILY || 4),
-  connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 15000),
-  greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 15000),
-  socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 20000),
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
+let smtpTransporterPromise = null;
+let smtpConnectHostPromise = null;
+
+async function resolveSmtpConnectHost() {
+  if (smtpConnectHostPromise) {
+    return smtpConnectHostPromise;
   }
-});
+
+  const smtpHost = process.env.SMTP_HOST;
+  smtpConnectHostPromise = (async () => {
+    if (!smtpHost) {
+      return smtpHost;
+    }
+
+    try {
+      const ipv4Addresses = await dns.promises.resolve4(smtpHost);
+      if (Array.isArray(ipv4Addresses) && ipv4Addresses.length > 0) {
+        return ipv4Addresses[0];
+      }
+    } catch (_err) {
+      // Fall back to the configured hostname if IPv4 resolution is unavailable.
+    }
+    return smtpHost;
+  })();
+
+  return smtpConnectHostPromise;
+}
+
+function createSmtpTransport(connectHost) {
+  return nodemailer.createTransport({
+    host: connectHost,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: String(process.env.SMTP_SECURE) === 'true',
+    family: Number(process.env.SMTP_FAMILY || 4),
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 15000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 15000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 20000),
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    },
+    tls: {
+      servername: process.env.SMTP_HOST || undefined
+    }
+  });
+}
+
+async function getSmtpTransporter() {
+  if (!smtpTransporterPromise) {
+    smtpTransporterPromise = (async () => {
+      const connectHost = await resolveSmtpConnectHost();
+      return createSmtpTransport(connectHost);
+    })();
+  }
+  return smtpTransporterPromise;
+}
 
 const frontendBaseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
 
 if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
   console.warn('SMTP env is incomplete. Forgot-password emails will fail until SMTP vars are set.');
 } else {
-  transporter.verify((err) => {
-    if (err) {
+  getSmtpTransporter()
+    .then((transporter) =>
+      transporter.verify((err) => {
+        if (err) {
+          console.error('SMTP verify failed:', err.message);
+          return;
+        }
+        console.log(`SMTP transporter is ready (family=${Number(process.env.SMTP_FAMILY || 4)})`);
+      })
+    )
+    .catch((err) => {
       console.error('SMTP verify failed:', err.message);
-      return;
-    }
-    console.log(`SMTP transporter is ready (family=${Number(process.env.SMTP_FAMILY || 4)})`);
-  });
+    });
 }
 
 function createPasswordResetCode() {
@@ -263,6 +312,7 @@ function createPasswordResetCode() {
 }
 
 async function sendPasswordResetEmail(toEmail, rawCode) {
+  const transporter = await getSmtpTransporter();
   await transporter.sendMail({
     from: process.env.SMTP_FROM || process.env.SMTP_USER,
     to: toEmail,
