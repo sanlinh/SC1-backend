@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const https = require('https');
 const dns = require("dns");
 dns.setDefaultResultOrder("ipv4first");
 const nodemailer = require('nodemailer');
@@ -292,29 +293,104 @@ async function withSmtpTransport(workFn) {
   throw lastErr || new Error('No SMTP host available');
 }
 
-const frontendBaseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
+function parseMailFrom(rawFromValue) {
+  const fallback = process.env.SMTP_USER || '';
+  const raw = String(rawFromValue || fallback).trim();
+  const match = raw.match(/^(.*)<([^>]+)>$/);
+  if (!match) {
+    return { email: raw, name: '' };
+  }
+  return {
+    name: String(match[1] || '').replace(/^"|"$/g, '').trim(),
+    email: String(match[2] || '').trim()
+  };
+}
 
-if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-  console.warn('SMTP env is incomplete. Forgot-password emails will fail until SMTP vars are set.');
-} else {
-  withSmtpTransport(
-    (transporter, connectHost) =>
-      new Promise((resolve, reject) => {
-        transporter.verify((err) => {
-          if (err) {
-            reject(err);
+async function sendEmailViaBrevo({ toEmail, subject, text, html }) {
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) {
+    throw new Error('BREVO_API_KEY is not configured');
+  }
+
+  const sender = parseMailFrom(process.env.MAIL_FROM || process.env.SMTP_FROM);
+  if (!sender.email) {
+    throw new Error('MAIL_FROM or SMTP_FROM must include a sender email');
+  }
+
+  const payload = JSON.stringify({
+    sender: sender.name ? { email: sender.email, name: sender.name } : { email: sender.email },
+    to: [{ email: toEmail }],
+    subject,
+    textContent: text,
+    htmlContent: html
+  });
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      {
+        hostname: 'api.brevo.com',
+        path: '/v3/smtp/email',
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'api-key': apiKey,
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload)
+        }
+      },
+      (response) => {
+        let body = '';
+        response.on('data', (chunk) => {
+          body += chunk;
+        });
+        response.on('end', () => {
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            resolve();
             return;
           }
-          resolve(connectHost);
+          reject(new Error(`Brevo API ${response.statusCode}: ${body || 'Unknown error'}`));
         });
+      }
+    );
+
+    request.on('error', reject);
+    request.write(payload);
+    request.end();
+  });
+}
+
+const mailProvider = String(process.env.MAIL_PROVIDER || (process.env.BREVO_API_KEY ? 'brevo' : 'smtp')).toLowerCase();
+const frontendBaseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
+
+if (mailProvider === 'brevo') {
+  if (!process.env.BREVO_API_KEY) {
+    console.warn('MAIL_PROVIDER=brevo but BREVO_API_KEY is missing. Forgot-password emails will fail.');
+  } else {
+    console.log('Mail provider ready: Brevo API');
+  }
+} else {
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.warn('SMTP env is incomplete. Forgot-password emails will fail until SMTP vars are set.');
+  } else {
+    withSmtpTransport(
+      (transporter, connectHost) =>
+        new Promise((resolve, reject) => {
+          transporter.verify((err) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            resolve(connectHost);
+          });
+        })
+    )
+      .then((connectHost) => {
+        console.log(`SMTP transporter is ready (host=${connectHost}, family=${Number(process.env.SMTP_FAMILY || 4)})`);
       })
-  )
-    .then((connectHost) => {
-      console.log(`SMTP transporter is ready (host=${connectHost}, family=${Number(process.env.SMTP_FAMILY || 4)})`);
-    })
-    .catch((err) => {
-      console.error('SMTP verify failed:', err.message);
-    });
+      .catch((err) => {
+        console.error('SMTP verify failed:', err.message);
+      });
+  }
 }
 
 function createPasswordResetCode() {
@@ -325,17 +401,26 @@ function createPasswordResetCode() {
 }
 
 async function sendPasswordResetEmail(toEmail, rawCode) {
+  const subject = 'EduQuest Password Reset Code';
+  const text = `Your EduQuest password reset code is: ${rawCode}\nThis code expires in 15 minutes.`;
+  const html = `
+    <p>Your EduQuest password reset code is:</p>
+    <p style="font-size: 24px; font-weight: 700; letter-spacing: 4px;">${rawCode}</p>
+    <p>This code expires in 15 minutes.</p>
+  `;
+
+  if (mailProvider === 'brevo') {
+    await sendEmailViaBrevo({ toEmail, subject, text, html });
+    return;
+  }
+
   await withSmtpTransport((transporter) =>
     transporter.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: toEmail,
-      subject: 'EduQuest Password Reset Code',
-      text: `Your EduQuest password reset code is: ${rawCode}\nThis code expires in 15 minutes.`,
-      html: `
-        <p>Your EduQuest password reset code is:</p>
-        <p style="font-size: 24px; font-weight: 700; letter-spacing: 4px;">${rawCode}</p>
-        <p>This code expires in 15 minutes.</p>
-      `
+      subject,
+      text,
+      html
     })
   );
 }
