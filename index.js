@@ -6,6 +6,8 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const dns = require("dns");
+dns.setDefaultResultOrder("ipv4first");
 const nodemailer = require('nodemailer');
 const rateLimit = require('express-rate-limit');
 
