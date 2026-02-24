@@ -231,6 +231,7 @@ const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
   secure: String(process.env.SMTP_SECURE) === 'true',
+  family: Number(process.env.SMTP_FAMILY || 4),
   connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 15000),
   greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 15000),
   socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 20000),
@@ -250,7 +251,7 @@ if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) 
       console.error('SMTP verify failed:', err.message);
       return;
     }
-    console.log('SMTP transporter is ready');
+    console.log(`SMTP transporter is ready (family=${Number(process.env.SMTP_FAMILY || 4)})`);
   });
 }
 
