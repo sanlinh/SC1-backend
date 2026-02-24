@@ -14,6 +14,13 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 
 // ===== MIDDLEWARE =====
+const trustProxyValue = process.env.TRUST_PROXY || (process.env.NODE_ENV === 'production' ? '1' : 'false');
+if (trustProxyValue !== 'false') {
+  const parsedTrustProxy =
+    trustProxyValue === 'true' ? true : Number.isNaN(Number(trustProxyValue)) ? trustProxyValue : Number(trustProxyValue);
+  app.set('trust proxy', parsedTrustProxy);
+}
+
 app.use(cors());
 app.use(express.json());
 
@@ -216,6 +223,7 @@ const forgotPasswordLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => req.ip || req.socket?.remoteAddress || 'unknown',
   message: { message: 'Too many requests. Please try again later.' }
 });
 
@@ -223,6 +231,9 @@ const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
   secure: String(process.env.SMTP_SECURE) === 'true',
+  connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 15000),
+  greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 15000),
+  socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 20000),
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS
